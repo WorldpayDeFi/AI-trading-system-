@@ -1,7 +1,15 @@
 {
-  "name": "node-starter",
-  "version": "0.0.0",
+  "name": "xg-trade-ai",
+  "version": "1.0.0",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.56.0"
   }
 }
