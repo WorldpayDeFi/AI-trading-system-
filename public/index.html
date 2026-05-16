@@ -1212,48 +1212,36 @@ function updateConf(val) {
   document.getElementById('rConf').textContent = val + '%';
 }
 
-// ---- SIMULATED LIVE PRICE UPDATES ----
-const prices = {
-  xau: { base: 2342.50, dp: 2 },
-  btc: { base: 67840.00, dp: 2 },
-  eth: { base: 3512.80, dp: 2 },
-  eur: { base: 1.0842, dp: 4 },
-  gbp: { base: 1.2710, dp: 4 }
-};
+// ---- LIVE PRICE UPDATES (via API) ----
+async function updatePrices() {
+  try {
+    const response = await fetch('/api/prices');
+    const data = await response.json();
 
-function nudge(base, dp) {
-  const delta = (Math.random() - 0.5) * (base * 0.0008);
-  return (base + delta).toFixed(dp);
+    Object.keys(data).forEach(sym => {
+      const price = parseFloat(data[sym]);
+      const formatted =
+        price > 100
+          ? price.toLocaleString('en-US', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2
+            })
+          : price.toFixed(4);
+
+      const priceEl = document.getElementById('price-' + sym);
+      if (priceEl) priceEl.textContent = formatted;
+
+      const tickerEl = document.getElementById('t-' + sym);
+      if (tickerEl) tickerEl.textContent = formatted;
+    });
+
+  } catch (err) {
+    console.error('Price update failed', err);
+  }
 }
 
-function updatePrices() {
-  Object.keys(prices).forEach(sym => {
-    const p = prices[sym];
-    const newPrice = nudge(p.base, p.dp);
-    const diff = ((parseFloat(newPrice) - p.base) / p.base * 100).toFixed(2);
-    const isUp = parseFloat(newPrice) >= p.base;
-
-    document.getElementById('price-' + sym).textContent =
-      p.dp === 4 ? parseFloat(newPrice).toFixed(4) : parseFloat(newPrice).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-
-    const chgEl = document.getElementById('chg-' + sym);
-    const absChg = Math.abs(diff);
-    chgEl.textContent = (isUp ? '▲ +' : '▼ -') + absChg + '%';
-    chgEl.className = 'asset-change ' + (isUp ? 'up' : 'dn');
-
-    // update ticker
-    const tEl = document.getElementById('t-' + sym);
-    if (tEl) tEl.textContent = p.dp === 4 ? parseFloat(newPrice).toFixed(4) :
-      parseFloat(newPrice).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    const tcEl = document.getElementById('tc-' + sym);
-    if (tcEl) {
-      tcEl.textContent = (isUp ? '+' : '-') + absChg + '%';
-      tcEl.className = 'chg ' + (isUp ? 'up' : 'dn');
-    }
-  });
-}
-
-setInterval(updatePrices, 3000);
+updatePrices();
+setInterval(updatePrices, 10000);
 
 // ---- SIMULATE NEW FEED ITEM ----
 let feedCount = 0;
@@ -1278,4 +1266,3 @@ setInterval(() => {
 </script>
 </body>
 </html>
-
