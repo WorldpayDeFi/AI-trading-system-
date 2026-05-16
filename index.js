@@ -21,6 +21,9 @@ const symbols = {
   gbp: 'GBP/USD'
 };
 
+// ── HELPER: sleep ─────────────────────────────────────────────────────────────
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ── HELPER: Twelve Data fetch ─────────────────────────────────────────────────
 async function td(endpoint, params) {
   const url = new URL(`https://api.twelvedata.com/${endpoint}`);
@@ -30,8 +33,35 @@ async function td(endpoint, params) {
   return res.data;
 }
 
+// ── HELPER: fetch all indicators for ONE symbol (sequential, rate-limit safe) ─
+async function fetchIndicators(symbol) {
+  const price  = await td('price', { symbol });
+  await sleep(500);
+  const ema9_1h = await td('ema', { symbol, interval: '1h', time_period: 9,  outputsize: 1 });
+  await sleep(500);
+  const ema20_1h = await td('ema', { symbol, interval: '1h', time_period: 20, outputsize: 1 });
+  await sleep(500);
+  const rsi_1h = await td('rsi', { symbol, interval: '1h', time_period: 14, outputsize: 1 });
+  await sleep(500);
+  const ema9_4h = await td('ema', { symbol, interval: '4h', time_period: 9,  outputsize: 1 });
+  await sleep(500);
+  const ema20_4h = await td('ema', { symbol, interval: '4h', time_period: 20, outputsize: 1 });
+  await sleep(500);
+  const rsi_4h = await td('rsi', { symbol, interval: '4h', time_period: 14, outputsize: 1 });
+
+  return {
+    price:    price.price,
+    ema9:     ema9_1h.values[0].ema,
+    ema20:    ema20_1h.values[0].ema,
+    rsi:      rsi_1h.values[0].rsi,
+    ema9_4h:  ema9_4h.values[0].ema,
+    ema20_4h: ema20_4h.values[0].ema,
+    rsi_4h:   rsi_4h.values[0].rsi
+  };
+}
+
 // ── HELPER: GPT-4o-mini AI analysis ──────────────────────────────────────────
-async function aiAnalyze(symbol, price, ema9, ema20, rsi, ema9_4h, ema20_4h, rsi_4h) {
+async function aiAnalyze(symbol, d) {
   const prompt = `
 You are XG, a professional institutional forex and gold trader.
 Your strategy: EMA 9/20 crossover on 1H and 4H with RSI 14 filter.
@@ -39,17 +69,17 @@ Your strategy: EMA 9/20 crossover on 1H and 4H with RSI 14 filter.
 Analyze this market data and return a trade signal:
 
 Symbol: ${symbol}
-Current Price: ${price}
+Current Price: ${d.price}
 
 1H Indicators:
-- EMA 9:  ${ema9}
-- EMA 20: ${ema20}
-- RSI 14: ${rsi}
+- EMA 9:  ${d.ema9}
+- EMA 20: ${d.ema20}
+- RSI 14: ${d.rsi}
 
 4H Indicators:
-- EMA 9:  ${ema9_4h}
-- EMA 20: ${ema20_4h}
-- RSI 14: ${rsi_4h}
+- EMA 9:  ${d.ema9_4h}
+- EMA 20: ${d.ema20_4h}
+- RSI 14: ${d.rsi_4h}
 
 Rules:
 - BUY only if EMA 9 > EMA 20 on BOTH timeframes AND RSI between 40-70
@@ -103,6 +133,7 @@ app.get('/api/prices', async (req, res) => {
       try {
         const data = await td('price', { symbol: symbols[key] });
         results[key] = data.price || null;
+        await sleep(300);
       } catch {
         results[key] = null;
       }
@@ -120,34 +151,12 @@ app.get('/api/analyze/:sym', async (req, res) => {
     const symbol = symbols[sym];
     if (!symbol) return res.status(400).json({ error: 'Unknown symbol' });
 
-    const [
-      priceData,
-      ema9_1h, ema20_1h, rsi_1h,
-      ema9_4h, ema20_4h, rsi_4h
-    ] = await Promise.all([
-      td('price', { symbol }),
-      td('ema', { symbol, interval: '1h', time_period: 9,  outputsize: 1 }),
-      td('ema', { symbol, interval: '1h', time_period: 20, outputsize: 1 }),
-      td('rsi', { symbol, interval: '1h', time_period: 14, outputsize: 1 }),
-      td('ema', { symbol, interval: '4h', time_period: 9,  outputsize: 1 }),
-      td('ema', { symbol, interval: '4h', time_period: 20, outputsize: 1 }),
-      td('rsi', { symbol, interval: '4h', time_period: 14, outputsize: 1 })
-    ]);
-
-    const price  = priceData.price;
-    const ema9   = ema9_1h.values[0].ema;
-    const ema20  = ema20_1h.values[0].ema;
-    const rsi    = rsi_1h.values[0].rsi;
-    const ema9f  = ema9_4h.values[0].ema;
-    const ema20f = ema20_4h.values[0].ema;
-    const rsif   = rsi_4h.values[0].rsi;
-
-    const analysis = await aiAnalyze(symbol, price, ema9, ema20, rsi, ema9f, ema20f, rsif);
+    const indicators = await fetchIndicators(symbol);
+    const analysis   = await aiAnalyze(symbol, indicators);
 
     res.json({
-      symbol, price,
-      ema9, ema20, rsi,
-      ema9_4h: ema9f, ema20_4h: ema20f, rsi_4h: rsif,
+      symbol,
+      ...indicators,
       ...analysis,
       timestamp: new Date().toISOString()
     });
@@ -159,48 +168,31 @@ app.get('/api/analyze/:sym', async (req, res) => {
 });
 
 // ── ROUTE: GET /api/analyze-all ───────────────────────────────────────────────
+// Sequential with 2s gap between assets to respect rate limits
 app.get('/api/analyze-all', async (req, res) => {
   const results = {};
 
   for (const sym of Object.keys(symbols)) {
     try {
-      const symbol = symbols[sym];
-
-      const [
-        priceData,
-        ema9_1h, ema20_1h, rsi_1h,
-        ema9_4h, ema20_4h, rsi_4h
-      ] = await Promise.all([
-        td('price', { symbol }),
-        td('ema', { symbol, interval: '1h', time_period: 9,  outputsize: 1 }),
-        td('ema', { symbol, interval: '1h', time_period: 20, outputsize: 1 }),
-        td('rsi', { symbol, interval: '1h', time_period: 14, outputsize: 1 }),
-        td('ema', { symbol, interval: '4h', time_period: 9,  outputsize: 1 }),
-        td('ema', { symbol, interval: '4h', time_period: 20, outputsize: 1 }),
-        td('rsi', { symbol, interval: '4h', time_period: 14, outputsize: 1 })
-      ]);
-
-      const price  = priceData.price;
-      const ema9   = ema9_1h.values[0].ema;
-      const ema20  = ema20_1h.values[0].ema;
-      const rsi    = rsi_1h.values[0].rsi;
-      const ema9f  = ema9_4h.values[0].ema;
-      const ema20f = ema20_4h.values[0].ema;
-      const rsif   = rsi_4h.values[0].rsi;
-
-      const analysis = await aiAnalyze(symbol, price, ema9, ema20, rsi, ema9f, ema20f, rsif);
+      const symbol     = symbols[sym];
+      const indicators = await fetchIndicators(symbol);
+      const analysis   = await aiAnalyze(symbol, indicators);
 
       results[sym] = {
-        symbol, price,
-        ema9, ema20, rsi,
-        ema9_4h: ema9f, ema20_4h: ema20f, rsi_4h: rsif,
+        symbol,
+        ...indicators,
         ...analysis
       };
 
+      console.log(`✅ ${symbol}: ${analysis.signal} ${analysis.confidence}%`);
+
     } catch (err) {
-      console.error(`${sym} failed:`, err.message);
+      console.error(`❌ ${sym} failed:`, err.message);
       results[sym] = { error: err.message };
     }
+
+    // 2 second gap between each asset to stay within rate limits
+    await sleep(2000);
   }
 
   res.json(results);
