@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const TWELVE_API = process.env.TWELVEDATA_API_KEY;
 const OPENAI_API = process.env.OPENAI_API_KEY;
 
-const symbols = {
+const SYMBOLS = {
   xau: 'XAU/USD',
   btc: 'BTC/USD',
   eth: 'ETH/USD',
@@ -21,184 +21,158 @@ const symbols = {
   gbp: 'GBP/USD'
 };
 
-// ── HELPER: sleep ─────────────────────────────────────────────────────────────
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ── HELPER: Twelve Data fetch ─────────────────────────────────────────────────
-async function td(endpoint, params) {
-  const url = new URL(`https://api.twelvedata.com/${endpoint}`);
-  url.searchParams.set('apikey', TWELVE_API);
-  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  const res = await axios.get(url.toString(), { timeout: 10000 });
-  return res.data;
+// ── Safe value extractor ──────────────────────────────────────────────────────
+function extractValue(data, type) {
+  try {
+    if (!data) return null;
+    if (data.status === 'error') return null;
+    // indicators return { values: [{ema/rsi: "..."}, ...] }
+    if (data.values && Array.isArray(data.values) && data.values.length > 0) {
+      return data.values[0][type] || null;
+    }
+    // price returns { price: "..." }
+    if (data.price) return data.price;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
-// ── HELPER: fetch all indicators for ONE symbol (sequential, rate-limit safe) ─
+// ── Twelve Data fetch ─────────────────────────────────────────────────────────
+async function td(endpoint, params) {
+  try {
+    const url = new URL(`https://api.twelvedata.com/${endpoint}`);
+    url.searchParams.set('apikey', TWELVE_API);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    const res = await axios.get(url.toString(), { timeout: 12000 });
+    return res.data;
+  } catch (err) {
+    console.error(`TD ${endpoint} failed:`, err.message);
+    return null;
+  }
+}
+
+// ── Fetch all indicators for one symbol safely ────────────────────────────────
 async function fetchIndicators(symbol) {
-  const price  = await td('price', { symbol });
-  await sleep(500);
-  const ema9_1h = await td('ema', { symbol, interval: '1h', time_period: 9,  outputsize: 1 });
-  await sleep(500);
+  const priceData = await td('price', { symbol });
+  await sleep(800);
+  const ema9_1h = await td('ema', { symbol, interval: '1h', time_period: 9, outputsize: 1 });
+  await sleep(800);
   const ema20_1h = await td('ema', { symbol, interval: '1h', time_period: 20, outputsize: 1 });
-  await sleep(500);
+  await sleep(800);
   const rsi_1h = await td('rsi', { symbol, interval: '1h', time_period: 14, outputsize: 1 });
-  await sleep(500);
-  const ema9_4h = await td('ema', { symbol, interval: '4h', time_period: 9,  outputsize: 1 });
-  await sleep(500);
+  await sleep(800);
+  const ema9_4h = await td('ema', { symbol, interval: '4h', time_period: 9, outputsize: 1 });
+  await sleep(800);
   const ema20_4h = await td('ema', { symbol, interval: '4h', time_period: 20, outputsize: 1 });
-  await sleep(500);
+  await sleep(800);
   const rsi_4h = await td('rsi', { symbol, interval: '4h', time_period: 14, outputsize: 1 });
 
+  const price    = extractValue(priceData, 'price')    || priceData?.price;
+  const ema9_1h_val  = extractValue(ema9_1h, 'ema');
+  const ema20_1h_val = extractValue(ema20_1h, 'ema');
+  const rsi_1h_val   = extractValue(rsi_1h, 'rsi');
+  const ema9_4h_val  = extractValue(ema9_4h, 'ema');
+  const ema20_4h_val = extractValue(ema20_4h, 'ema');
+  const rsi_4h_val   = extractValue(rsi_4h, 'rsi');
+
+  // Log for debugging
+  console.log(`${symbol} → price:${price} ema9_1h:${ema9_1h_val} rsi_1h:${rsi_1h_val}`);
+
+  if (!price || !ema9_1h_val || !ema20_1h_val || !rsi_1h_val) {
+    throw new Error(`Incomplete data for ${symbol}`);
+  }
+
   return {
-    price:    price.price,
-    ema9:     ema9_1h.values[0].ema,
-    ema20:    ema20_1h.values[0].ema,
-    rsi:      rsi_1h.values[0].rsi,
-    ema9_4h:  ema9_4h.values[0].ema,
-    ema20_4h: ema20_4h.values[0].ema,
-    rsi_4h:   rsi_4h.values[0].rsi
+    price,
+    ema9_1h:  ema9_1h_val,
+    ema20_1h: ema20_1h_val,
+    rsi_1h:   rsi_1h_val,
+    ema9_4h:  ema9_4h_val  || ema9_1h_val,
+    ema20_4h: ema20_4h_val || ema20_1h_val,
+    rsi_4h:   rsi_4h_val   || rsi_1h_val
   };
 }
 
-// ── HELPER: GPT-4o-mini AI analysis ──────────────────────────────────────────
+// ── GPT-4o-mini AI analysis ───────────────────────────────────────────────────
 async function aiAnalyze(symbol, d) {
-  const prompt = `
-You are XG, a professional institutional forex and gold trader.
-Your strategy: EMA 9/20 crossover on 1H and 4H with RSI 14 filter.
-
-Analyze this market data and return a trade signal:
+  const prompt = `You are XG, a professional institutional trader. Strategy: EMA 9/20 crossover + RSI 14 on 1H and 4H.
 
 Symbol: ${symbol}
-Current Price: ${d.price}
-
-1H Indicators:
-- EMA 9:  ${d.ema9}
-- EMA 20: ${d.ema20}
-- RSI 14: ${d.rsi}
-
-4H Indicators:
-- EMA 9:  ${d.ema9_4h}
-- EMA 20: ${d.ema20_4h}
-- RSI 14: ${d.rsi_4h}
+Price: ${d.price}
+1H — EMA9: ${d.ema9_1h}, EMA20: ${d.ema20_1h}, RSI: ${d.rsi_1h}
+4H — EMA9: ${d.ema9_4h}, EMA20: ${d.ema20_4h}, RSI: ${d.rsi_4h}
 
 Rules:
-- BUY only if EMA 9 > EMA 20 on BOTH timeframes AND RSI between 40-70
-- SELL only if EMA 9 < EMA 20 on BOTH timeframes AND RSI between 30-60
-- WAIT if timeframes conflict or RSI is extreme (>75 or <25)
-- Confluence across 1H and 4H increases confidence
-- Stop loss: 1.2% from entry for XAU/BTC/ETH, 0.3% for forex pairs
-- Take profit: 2.8x the stop loss distance (1:2.8 RR)
+- BUY: EMA9 > EMA20 on both TFs, RSI 40-70
+- SELL: EMA9 < EMA20 on both TFs, RSI 30-60
+- WAIT: conflict or RSI extreme
+- SL: 1.2% for XAU/BTC/ETH, 0.3% for forex
+- TP: 2.8x SL
 
-Return ONLY this exact JSON, no extra text, no markdown:
-{
-  "signal": "BUY" or "SELL" or "WAIT",
-  "confidence": number between 0 and 100,
-  "entry": "price as string",
-  "stopLoss": "price as string",
-  "takeProfit": "price as string",
-  "riskReward": "1:x",
-  "sentiment": "Bullish" or "Bearish" or "Neutral",
-  "timeframeAlign": "1H+4H ✓" or "1H only" or "4H only" or "No conf.",
-  "reason": "2-3 sentence professional analysis explaining the signal"
-}
-`;
+Return ONLY valid JSON no markdown:
+{"signal":"BUY","confidence":85,"entry":"${d.price}","stopLoss":"price","takeProfit":"price","riskReward":"1:2.8","sentiment":"Bullish","timeframeAlign":"1H+4H ✓","reason":"2 sentence analysis"}`;
 
-  const response = await axios.post(
+  const res = await axios.post(
     'https://api.openai.com/v1/chat/completions',
     {
       model: 'gpt-4o-mini',
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
-      max_tokens: 350
+      max_tokens: 300
     },
     {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { Authorization: `Bearer ${OPENAI_API}`, 'Content-Type': 'application/json' },
       timeout: 15000
     }
   );
 
-  const raw   = response.data.choices[0].message.content.trim();
-  const clean = raw.replace(/```json|```/g, '').trim();
-  return JSON.parse(clean);
+  const raw = res.data.choices[0].message.content.trim().replace(/```json|```/g, '').trim();
+  return JSON.parse(raw);
 }
 
-// ── ROUTE: GET /api/prices ────────────────────────────────────────────────────
+// ── ROUTE: /api/prices ────────────────────────────────────────────────────────
 app.get('/api/prices', async (req, res) => {
   try {
     const results = {};
-    for (const key in symbols) {
-      try {
-        const data = await td('price', { symbol: symbols[key] });
-        results[key] = data.price || null;
-        await sleep(300);
-      } catch {
-        results[key] = null;
-      }
+    for (const [key, symbol] of Object.entries(SYMBOLS)) {
+      const data = await td('price', { symbol });
+      results[key] = data?.price || null;
+      await sleep(300);
     }
     res.json(results);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch prices' });
-  }
-});
-
-// ── ROUTE: GET /api/analyze/:sym ──────────────────────────────────────────────
-app.get('/api/analyze/:sym', async (req, res) => {
-  try {
-    const sym    = req.params.sym.toLowerCase();
-    const symbol = symbols[sym];
-    if (!symbol) return res.status(400).json({ error: 'Unknown symbol' });
-
-    const indicators = await fetchIndicators(symbol);
-    const analysis   = await aiAnalyze(symbol, indicators);
-
-    res.json({
-      symbol,
-      ...indicators,
-      ...analysis,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (err) {
-    console.error('Analyze error:', err.response?.data || err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── ROUTE: GET /api/analyze-all ───────────────────────────────────────────────
-// Sequential with 2s gap between assets to respect rate limits
+// ── ROUTE: /api/analyze-all ───────────────────────────────────────────────────
 app.get('/api/analyze-all', async (req, res) => {
   const results = {};
 
-  for (const sym of Object.keys(symbols)) {
+  for (const [sym, symbol] of Object.entries(SYMBOLS)) {
     try {
-      const symbol     = symbols[sym];
+      console.log(`\n🔍 Analyzing ${symbol}...`);
       const indicators = await fetchIndicators(symbol);
-      const analysis   = await aiAnalyze(symbol, indicators);
+      await sleep(1000);
+      const analysis = await aiAnalyze(symbol, indicators);
 
-      results[sym] = {
-        symbol,
-        ...indicators,
-        ...analysis
-      };
-
+      results[sym] = { symbol, ...indicators, ...analysis };
       console.log(`✅ ${symbol}: ${analysis.signal} ${analysis.confidence}%`);
 
     } catch (err) {
-      console.error(`❌ ${sym} failed:`, err.message);
+      console.error(`❌ ${sym}: ${err.message}`);
       results[sym] = { error: err.message };
     }
 
-    // 2 second gap between each asset to stay within rate limits
-    await sleep(2000);
+    // 3 second gap between assets
+    await sleep(3000);
   }
 
   res.json(results);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`XG TRADE AI live on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`✅ XG TRADE AI live on port ${PORT}`));
